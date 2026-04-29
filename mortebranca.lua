@@ -2,6 +2,7 @@
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
+
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
@@ -11,10 +12,8 @@ local MaxAimbotDistance = 650
 local AimbotKey = Enum.UserInputType.MouseButton2
 local AimbotEnabled = true
 local ESPEnabled = true
-local AimSpeed = 58.0          -- Quanto maior, mais "rápido"
-
-local AimPart = "Head"         -- "Head" ou "HumanoidRootPart" (Corpo)
-local ShowAimPart = true       -- Mostra qual parte está mirando no GUI
+local AimSpeed = 58.0
+local AimPart = "Head" -- "Head" ou "HumanoidRootPart"
 
 -- ==================== ScreenGui ====================
 local screenGui = Instance.new("ScreenGui")
@@ -22,23 +21,7 @@ screenGui.Name = "MorteBranca"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
--- = Toggle Button Lateral =
-local toggleButton = Instance.new("TextButton")
-toggleButton.Size = UDim2.new(0, 18, 0, 36)
-toggleButton.Position = UDim2.new(1, -20, 0.5, -18)
-toggleButton.BackgroundTransparency = 1
-toggleButton.Text = "◀"
-toggleButton.TextColor3 = Color3.fromRGB(170, 170, 185)
-toggleButton.TextSize = 16
-toggleButton.Font = Enum.Font.GothamBold
-toggleButton.BorderSizePixel = 0
-toggleButton.ZIndex = 20
-toggleButton.Parent = screenGui
-
-toggleButton.MouseEnter:Connect(function() toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255) end)
-toggleButton.MouseLeave:Connect(function() toggleButton.TextColor3 = Color3.fromRGB(170, 170, 185) end)
-
--- == Main Frame =
+-- ==================== Main Frame ====================
 local mainFrame = Instance.new("Frame")
 mainFrame.Size = UDim2.new(0, 270, 0, 260)
 mainFrame.Position = UDim2.new(1, -305, 0.5, -130)
@@ -52,6 +35,7 @@ mainFrame.Parent = screenGui
 
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 16)
 
+-- Blur + Overlay
 local blur = Instance.new("BlurEffect")
 blur.Size = 24
 blur.Parent = mainFrame
@@ -91,7 +75,7 @@ line.Position = UDim2.new(0, 16, 0, 50)
 line.BackgroundColor3 = Color3.fromRGB(160, 100, 255)
 line.BorderSizePixel = 0
 
--- == Toggles =
+-- ==================== Funções de Criação ====================
 local function createToggle(yPos, text, defaultValue, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -30, 0, 32)
@@ -111,7 +95,7 @@ local function createToggle(yPos, text, defaultValue, callback)
     local button = Instance.new("TextButton", frame)
     button.Size = UDim2.new(0, 62, 0, 26)
     button.Position = UDim2.new(1, -72, 0.5, -13)
-   button.BackgroundColor3 = defaultValue and Color3.fromRGB(180, 130, 255) or Color3.fromRGB(0, 0, 0)
+    button.BackgroundColor3 = defaultValue and Color3.fromRGB(180, 130, 255) or Color3.fromRGB(0, 0, 0)
     button.Text = defaultValue and "ON" or "OFF"
     button.TextColor3 = Color3.fromRGB(255,255,255)
     button.Font = Enum.Font.GothamBold
@@ -127,10 +111,6 @@ local function createToggle(yPos, text, defaultValue, callback)
     end)
 end
 
-createToggle(65, "Aimbot", AimbotEnabled, function(v) AimbotEnabled = v end)
-createToggle(105, "ESP", ESPEnabled, function(v) ESPEnabled = v end)
-
--- = Input Fields =
 local function createInput(yPos, labelText, defaultValue, isFOV)
     local label = Instance.new("TextLabel", mainFrame)
     label.Size = UDim2.new(1, -30, 0, 24)
@@ -168,10 +148,14 @@ local function createInput(yPos, labelText, defaultValue, isFOV)
     end)
 end
 
+-- ==================== Interface ====================
+createToggle(65,  "Aimbot", AimbotEnabled, function(v) AimbotEnabled = v end)
+createToggle(105, "ESP",    ESPEnabled,    function(v) ESPEnabled = v end)
+
 createInput(150, "FOV: ", AimbotFOV, true)
 createInput(180, "Distância Máx: ", MaxAimbotDistance, false)
 
--- Indicador de parte do corpo
+-- Indicador de mira
 local aimPartLabel = Instance.new("TextLabel", mainFrame)
 aimPartLabel.Size = UDim2.new(1, -30, 0, 26)
 aimPartLabel.Position = UDim2.new(0, 15, 0, 215)
@@ -182,16 +166,15 @@ aimPartLabel.Font = Enum.Font.GothamBold
 aimPartLabel.TextSize = 14
 aimPartLabel.TextXAlignment = Enum.TextXAlignment.Left
 
--- = Função de Toggle da Interface =
-local function toggleInterface()
-    mainFrame.Visible = not mainFrame.Visible
-    toggleButton.Text = mainFrame.Visible and "▶" or "◀"
-end
-toggleButton.MouseButton1Click:Connect(toggleInterface)
-
--- = Tecla F - Mudar entre Cabeça e Corpo =
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
+-- ==================== Toggle com Right Shift ====================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        mainFrame.Visible = not mainFrame.Visible
+    end
+    
+    -- Alternar parte da mira (B)
     if input.KeyCode == Enum.KeyCode.B then
         if AimPart == "Head" then
             AimPart = "HumanoidRootPart"
@@ -203,11 +186,13 @@ UserInputService.InputBegan:Connect(function(input, gp)
     end
 end)
 
--- = ESP FUDIDAO =
+-- ==================== ESP ====================
+-- (Mantive seu ESP, só organizei um pouco)
 local ESPObjects = {}
 
 local function createESP(player)
     if player == LocalPlayer or ESPObjects[player] then return end
+    
     local nameTag = Drawing.new("Text")
     nameTag.Size = 15.8
     nameTag.Center = true
@@ -215,7 +200,6 @@ local function createESP(player)
     nameTag.OutlineColor = Color3.fromRGB(0, 0, 0)
     nameTag.Color = Color3.fromRGB(195, 145, 255)
     nameTag.Transparency = 0.45
-    nameTag.TextStrokeTransparency = 0.35
     nameTag.Visible = false
     ESPObjects[player] = nameTag
 end
@@ -252,7 +236,7 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- = Aimbot Potente =
+-- ==================== Aimbot ====================
 local function hasItemInHand()
     local char = LocalPlayer.Character
     return char and char:FindFirstChildOfClass("Tool") ~= nil
@@ -264,22 +248,19 @@ local function getClosestTarget()
     local mousePos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local char = player.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 then
-                    local targetPart = char:FindFirstChild(AimPart) or char:FindFirstChild("HumanoidRootPart")
-                    if targetPart then
-                        local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
-                        if onScreen then
-                            local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
-                            local realDist = (Camera.CFrame.Position - targetPart.Position).Magnitude
+        if player ~= LocalPlayer and player.Character then
+            local hum = player.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local targetPart = player.Character:FindFirstChild(AimPart) or player.Character:FindFirstChild("HumanoidRootPart")
+                if targetPart then
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                    if onScreen then
+                        local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                        local realDist = (Camera.CFrame.Position - targetPart.Position).Magnitude
 
-                            if screenDist < AimbotFOV and screenDist < closestDist and realDist <= MaxAimbotDistance then
-                                closestDist = screenDist
-                                closestPlayer = player
-                            end
+                        if screenDist < AimbotFOV and screenDist < closestDist and realDist <= MaxAimbotDistance then
+                            closestDist = screenDist
+                            closestPlayer = player
                         end
                     end
                 end
@@ -289,10 +270,10 @@ local function getClosestTarget()
     return closestPlayer
 end
 
--- Aimbot Loop 
+-- Aimbot Loop
 RunService.RenderStepped:Connect(function(dt)
-    if not AimbotEnabled or not hasItemInHand() or not UserInputService:IsMouseButtonPressed(AimbotKey) then 
-        return 
+    if not AimbotEnabled or not hasItemInHand() or not UserInputService:IsMouseButtonPressed(AimbotKey) then
+        return
     end
 
     local target = getClosestTarget()
@@ -302,18 +283,13 @@ RunService.RenderStepped:Connect(function(dt)
     if not targetPart then return end
 
     local camPos = Camera.CFrame.Position
-    local targetPos = targetPart.Position
-
-    -- Leve prediction (melhora muito em movimento)
-    local velocity = target.Character:FindFirstChild("HumanoidRootPart").Velocity
-    targetPos = targetPos + velocity * 0.035   -- ajuste fino aqui se quiser mais/menos predição
+    local targetPos = targetPart.Position + (target.Character.HumanoidRootPart.Velocity * 0.035)
 
     local direction = (targetPos - camPos).Unit
     local targetCF = CFrame.new(camPos, camPos + direction)
 
-    -- Smoothing mais potente
-    local lerpAlpha = math.clamp(AimSpeed * 0.016 * 1.8, 0.08, 0.92)  -- otimizado para 60fps
+    local lerpAlpha = math.clamp(AimSpeed * 0.016 * 1.8, 0.08, 0.92)
     Camera.CFrame = Camera.CFrame:Lerp(targetCF, lerpAlpha)
 end)
 
-print("Morte Branca carregado - Aimbot aprimorado | Pressione B para alternar Cabeça/Corpo")
+print("✅ Morte Branca carregado | Shift Direito = Abrir/Fechar Menu | B = Alternar Cabeça/Corpo")
