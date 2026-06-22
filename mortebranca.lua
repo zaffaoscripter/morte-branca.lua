@@ -6,7 +6,7 @@ local LocalPlayer       = Players.LocalPlayer
 local Camera            = workspace.CurrentCamera
 
 -- ==================== Configurações ====================
-local AimbotFOV         = 180
+local AimbotFOV         = 220
 local MaxAimbotDistance = 650
 local AimbotKey         = Enum.UserInputType.MouseButton2
 local AimSpeed          = 58.0
@@ -34,40 +34,56 @@ local function matchesAny(str, list)
     return false
 end
 
+local cacheRebuilding = false -- evita rebuilds simultâneos
+
 local function rebuildHostileCache()
-    hostileCache = {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("Model") and obj ~= LocalPlayer.Character then
-            local humanoid = obj:FindFirstChildOfClass("Humanoid")
-            local root     = obj:FindFirstChild("HumanoidRootPart")
-            if humanoid and root then
-                local isPriority = matchesAny(obj.Name, PRIORITY_NAMES)
-                local isHostile  = isPriority or matchesAny(obj.Name, HOSTILE_NAMES)
-                    or (obj.Parent and (
-                        matchesAny(obj.Parent.Name, PRIORITY_NAMES) or
-                        matchesAny(obj.Parent.Name, HOSTILE_NAMES)
-                    ))
-                if isHostile then
-                    table.insert(hostileCache, {
-                        model      = obj,
-                        humanoid   = humanoid,
-                        root       = root,
-                        isPriority = isPriority,
-                    })
+    if cacheRebuilding then return end
+    cacheRebuilding = true
+
+    task.spawn(function()
+        local newCache = {}
+        local count    = 0
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") and obj ~= LocalPlayer.Character then
+                local humanoid = obj:FindFirstChildOfClass("Humanoid")
+                local root     = obj:FindFirstChild("HumanoidRootPart")
+                if humanoid and root then
+                    local isPriority = matchesAny(obj.Name, PRIORITY_NAMES)
+                    local isHostile  = isPriority or matchesAny(obj.Name, HOSTILE_NAMES)
+                        or (obj.Parent and (
+                            matchesAny(obj.Parent.Name, PRIORITY_NAMES) or
+                            matchesAny(obj.Parent.Name, HOSTILE_NAMES)
+                        ))
+                    if isHostile then
+                        table.insert(newCache, {
+                            model      = obj,
+                            humanoid   = humanoid,
+                            root       = root,
+                            isPriority = isPriority,
+                        })
+                    end
                 end
             end
+            -- Yield a cada 200 objetos para não travar o jogo
+            count = count + 1
+            if count % 200 == 0 then
+                task.wait()
+            end
         end
-    end
+        hostileCache    = newCache
+        cacheRebuilding = false
+    end)
 end
 
 -- Atualiza cache quando entidades aparecem/somem
 workspace.DescendantAdded:Connect(function(obj)
     if obj:IsA("Model") then
-        task.delay(0.1, rebuildHostileCache) -- pequeno delay p/ filhos carregarem
+        task.delay(0.5, rebuildHostileCache) -- delay maior: evita spam de rebuilds
     end
 end)
 workspace.DescendantRemoving:Connect(function(obj)
     if obj:IsA("Model") then
+        -- Remoção é barata: só tira do cache sem rebuild completo
         for i, entry in ipairs(hostileCache) do
             if entry.model == obj then
                 table.remove(hostileCache, i)
@@ -77,7 +93,8 @@ workspace.DescendantRemoving:Connect(function(obj)
     end
 end)
 
-rebuildHostileCache()
+-- Scan inicial assíncrono: não trava o jogo ao executar
+task.spawn(rebuildHostileCache)
 
 -- ==================== ScreenGui ====================
 local screenGui = Instance.new("ScreenGui")
@@ -422,7 +439,7 @@ local function getClosestHostileNPC()
     local now = tick()
     if now - lastCacheScan >= CACHE_INTERVAL then
         lastCacheScan = now
-        rebuildHostileCache()
+        task.spawn(rebuildHostileCache)
     end
 
     for _, entry in ipairs(hostileCache) do
