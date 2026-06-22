@@ -85,7 +85,7 @@ local function newLabel(color)
     if not hasDrawing then return nil end
     local ok, t = pcall(function()
         local d = Drawing.new("Text")
-        d.Size         = 14   -- tamanho legível para Drawing API (executors)
+        d.Size         = 18   -- tamanho legível para Drawing API (executors)
         d.Center       = true
         d.Outline      = true
         d.Font         = 2    -- UI (mais legível que Plex)
