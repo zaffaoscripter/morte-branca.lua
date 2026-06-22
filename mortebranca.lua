@@ -15,8 +15,9 @@ local AimPart           = "Head"
 
 local AimbotEnabled = true
 local AimNPCEnabled = true
-local AimNPCStrong  = true
+local AimNPCStrong  = true   -- sempre ativo
 local ESPEnabled    = true
+local ESPNPCEnabled = true   -- novo: ESP de NPCs separado
 
 -- ==================== Player lookup ====================
 local playerChars = {}
@@ -54,81 +55,48 @@ local function isNPCModel(model)
 end
 
 -- ==================== ESP via Drawing ====================
--- Usa Drawing API (Synapse/KRNL) — caixa 2D ao redor do personagem na tela
--- Roxa pra player, vermelha pra NPC
-
 local PLAYER_COLOR = Color3.fromRGB(170, 80, 255)
 local NPC_COLOR    = Color3.fromRGB(255, 50, 50)
-local espObjects   = {}   -- [character] = { lines={}, label }
+local espObjects   = {}   -- [character] = { label }
 
 local hasDrawing = (typeof(Drawing) == "table") or (Drawing ~= nil)
-
-local function newLine(color)
-    if not hasDrawing then return nil end
-    local l = Drawing.new("Line")
-    l.Thickness  = 1.5
-    l.Color      = color
-    l.Visible    = false
-    l.Transparency = 1
-    return l
-end
 
 local function newLabel(color)
     if not hasDrawing then return nil end
     local t = Drawing.new("Text")
-    t.Size    = 13
-    t.Center  = true
-    t.Outline = true
-    t.Font    = 2
-    t.Color   = color
+    t.Size         = 13
+    t.Center       = true
+    t.Outline      = true
+    t.Font         = 1
+    t.Color        = color
     t.OutlineColor = Color3.fromRGB(0, 0, 0)
-    t.Visible = false
+    t.Visible      = false
     return t
 end
 
 local function createESP(character, color)
     if espObjects[character] then return end
-    local lines = {}
-    for i = 1, 4 do lines[i] = newLine(color) end
     local label = newLabel(color)
-    espObjects[character] = { lines = lines, label = label, color = color }
+    espObjects[character] = { lines = {}, label = label, color = color }
 end
 
 local function removeESP(character)
     local obj = espObjects[character]
     if not obj then return end
-    for _, l in ipairs(obj.lines) do if l then l:Remove() end end
     if obj.label then obj.label:Remove() end
     espObjects[character] = nil
 end
 
--- Desenha caixa 2D a partir de corners na tela
-local function drawBox(lines, x, y, w, h)
-    -- top, bottom, left, right
-    local corners = {
-        { Vector2.new(x,     y),     Vector2.new(x + w, y)     },
-        { Vector2.new(x,     y + h), Vector2.new(x + w, y + h) },
-        { Vector2.new(x,     y),     Vector2.new(x,     y + h) },
-        { Vector2.new(x + w, y),     Vector2.new(x + w, y + h) },
-    }
-    for i, pts in ipairs(corners) do
-        if lines[i] then
-            lines[i].From    = pts[1]
-            lines[i].To      = pts[2]
-            lines[i].Visible = true
-        end
-    end
-end
-
 local function hideBox(lines, label)
-    for _, l in ipairs(lines) do if l then l.Visible = false end end
     if label then label.Visible = false end
 end
 
 -- Atualiza ESP todo frame
 RunService.RenderStepped:Connect(function()
     for character, obj in pairs(espObjects) do
-        if not ESPEnabled then
+        local isNPC = trackedNPCs and trackedNPCs[character] ~= nil
+
+        if not ESPEnabled or (isNPC and not ESPNPCEnabled) then
             hideBox(obj.lines, obj.label)
         else
             local hum  = character:FindFirstChildOfClass("Humanoid")
@@ -136,23 +104,15 @@ RunService.RenderStepped:Connect(function()
             local head = character:FindFirstChild("Head")
 
             if hum and root and head and hum.Health > 0 then
-                -- Projeta topo (acima da cabeça) e base (root) na tela
-                local topPos,    topVis  = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.7, 0))
-                local bottomPos, botVis  = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 2.8, 0))
+                local topPos, topVis   = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.7, 0))
+                local _, botVis        = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 2.8, 0))
 
                 if topVis and botVis and topPos.Z > 0 then
-                    local h = math.abs(bottomPos.Y - topPos.Y)
-                    local w = h * 0.55
-                    local x = topPos.X - w / 2
-                    local y = topPos.Y
-
-                    drawBox(obj.lines, x, y, w, h)
-
                     if obj.label then
-                        local dist = (Camera.CFrame.Position - root.Position).Magnitude
+                        local dist   = (Camera.CFrame.Position - root.Position).Magnitude
                         local player = playerChars[character]
                         local name   = player and player.Name or character.Name
-                        obj.label.Position = Vector2.new(topPos.X, y - 16)
+                        obj.label.Position = Vector2.new(topPos.X, topPos.Y - 16)
                         obj.label.Text     = name .. "  [" .. math.floor(dist) .. "m]"
                         obj.label.Visible  = true
                     end
@@ -223,7 +183,6 @@ workspace.DescendantRemoving:Connect(function(obj)
     end
 end)
 
--- Scan inicial assíncrono sem travar
 task.spawn(function()
     local count = 0
     for _, obj in ipairs(workspace:GetDescendants()) do
@@ -261,7 +220,7 @@ frameStroke.Thickness    = 1.4
 frameStroke.Transparency = 0.3
 frameStroke.Parent       = mainFrame
 
--- ==================== Drag (só barra do título) ====================
+-- ==================== Drag ====================
 local titleBar = Instance.new("Frame")
 titleBar.Size               = UDim2.new(1, 0, 0, 54)
 titleBar.BackgroundTransparency = 1
@@ -315,9 +274,7 @@ sep.ZIndex           = 7
 sep.Parent           = mainFrame
 
 -- ==================== UI Helpers ====================
-local npcStrongBtn = nil
-
-local function makeToggle(yPos, label, value, onChange, captureRef)
+local function makeToggle(yPos, label, value, onChange)
     local row = Instance.new("Frame")
     row.Size               = UDim2.new(1, -28, 0, 32)
     row.Position           = UDim2.new(0, 14, 0, yPos)
@@ -349,12 +306,10 @@ local function makeToggle(yPos, label, value, onChange, captureRef)
     btn.Parent           = row
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 
-    if captureRef then captureRef(btn) end
-
     btn.MouseButton1Click:Connect(function()
-        value            = not value
+        value                = not value
         btn.BackgroundColor3 = value and Color3.fromRGB(148, 68, 255) or Color3.fromRGB(36, 36, 46)
-        btn.Text         = value and "ON" or "OFF"
+        btn.Text             = value and "ON" or "OFF"
         onChange(value)
     end)
 end
@@ -387,10 +342,10 @@ local function makeInput(yPos, label, default, isFOV)
     Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
 
     local bStroke = Instance.new("UIStroke")
-    bStroke.Color       = Color3.fromRGB(100, 40, 180)
-    bStroke.Thickness   = 1
+    bStroke.Color        = Color3.fromRGB(100, 40, 180)
+    bStroke.Thickness    = 1
     bStroke.Transparency = 0.45
-    bStroke.Parent      = box
+    bStroke.Parent       = box
 
     box.FocusLost:Connect(function()
         local n = tonumber(box.Text)
@@ -412,15 +367,16 @@ end
 
 -- ==================== Build UI ====================
 makeToggle(62,  "Aimbot  ·  Players",  AimbotEnabled, function(v) AimbotEnabled = v end)
-makeToggle(97,  "Aimbot  ·  NPC",      AimNPCEnabled, function(v)
-    AimNPCEnabled = v
-    if npcStrongBtn then
-        npcStrongBtn.TextTransparency       = v and 0 or 0.5
-        npcStrongBtn.BackgroundTransparency = v and 0 or 0.5
+makeToggle(97,  "Aimbot  ·  NPC",      AimNPCEnabled, function(v) AimNPCEnabled = v end)
+makeToggle(132, "ESP  ·  NPCs",        ESPNPCEnabled, function(v)
+    ESPNPCEnabled = v
+    if not v then
+        for model in pairs(trackedNPCs) do
+            local obj = espObjects[model]
+            if obj then hideBox(obj.lines, obj.label) end
+        end
     end
 end)
-makeToggle(132, "NPC  ·  Lock On",     AimNPCStrong,  function(v) AimNPCStrong = v end,
-    function(r) npcStrongBtn = r end)
 makeToggle(167, "ESP  ·  Outlines",    ESPEnabled,    function(v)
     ESPEnabled = v
     if not v then
@@ -546,6 +502,7 @@ RunService.RenderStepped:Connect(function()
     if not targetPart then return end
 
     if isNPC and AimNPCStrong then
+        -- Lock On sempre ativo para NPCs
         Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPart.Position)
     else
         local root      = targetPart.Parent and targetPart.Parent:FindFirstChild("HumanoidRootPart")
