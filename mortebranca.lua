@@ -1,100 +1,239 @@
--- ==================== Serviços ====================
+-- ==================== Services ====================
 local UserInputService = game:GetService("UserInputService")
-local RunService        = game:GetService("RunService")
-local Players           = game:GetService("Players")
-local LocalPlayer       = Players.LocalPlayer
-local Camera            = workspace.CurrentCamera
+local RunService       = game:GetService("RunService")
+local Players          = game:GetService("Players")
+local LocalPlayer      = Players.LocalPlayer
+local Camera           = workspace.CurrentCamera
 
--- ==================== Configurações ====================
-local AimbotFOV         = 220
-local MaxAimbotDistance = 650
+-- ==================== Config ====================
+local AimbotFOV         = 180
+local MaxAimbotDistance = 500
+local NpcScanRadius     = 250
 local AimbotKey         = Enum.UserInputType.MouseButton2
-local AimSpeed          = 58.0
+local AimSpeed          = 55.0
 local AimPart           = "Head"
 
-local AimbotEnabled  = true
-local AimNPCEnabled  = true
-local AimNPCStrong   = true
-local ESPEnabled     = true
+local AimbotEnabled = true
+local AimNPCEnabled = true
+local AimNPCStrong  = true
+local ESPEnabled    = true
 
--- ==================== Cache de NPCs Hostis ====================
--- Evita workspace:GetDescendants() todo frame (caro demais)
-local hostileCache    = {}   -- { part = BasePart, isPriority = bool }
-local CACHE_INTERVAL  = 2.5  -- segundos entre rescans
-local lastCacheScan   = 0
+-- ==================== Player lookup ====================
+local playerChars = {}
 
-local HOSTILE_NAMES   = { "bandit", "zombie", "thug", "outlaw" }
-local PRIORITY_NAMES  = { "moe wolff", "elder vampire", "vampire boss", "wolff" }
-
-local function matchesAny(str, list)
-    local s = str:lower()
-    for _, v in ipairs(list) do
-        if s:find(v, 1, true) then return true end
+local function rebuildPlayerChars()
+    playerChars = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then playerChars[p.Character] = p end
     end
-    return false
+end
+rebuildPlayerChars()
+
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function(c)
+        playerChars[c] = p
+    end)
+    p.CharacterRemoving:Connect(function(c)
+        playerChars[c] = nil
+    end)
+end)
+Players.PlayerRemoving:Connect(function(p)
+    if p.Character then playerChars[p.Character] = nil end
+end)
+
+local function isPlayerChar(model)
+    return playerChars[model] ~= nil
 end
 
-local cacheRebuilding = false -- evita rebuilds simultâneos
+local function isNPCModel(model)
+    if model == LocalPlayer.Character then return false end
+    if isPlayerChar(model) then return false end
+    local hum  = model:FindFirstChildOfClass("Humanoid")
+    local root = model:FindFirstChild("HumanoidRootPart")
+    return hum ~= nil and root ~= nil
+end
 
-local function rebuildHostileCache()
-    if cacheRebuilding then return end
-    cacheRebuilding = true
+-- ==================== ESP via Drawing ====================
+-- Usa Drawing API (Synapse/KRNL) — caixa 2D ao redor do personagem na tela
+-- Roxa pra player, vermelha pra NPC
 
-    task.spawn(function()
-        local newCache = {}
-        local count    = 0
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("Model") and obj ~= LocalPlayer.Character then
-                local humanoid = obj:FindFirstChildOfClass("Humanoid")
-                local root     = obj:FindFirstChild("HumanoidRootPart")
-                if humanoid and root then
-                    local isPriority = matchesAny(obj.Name, PRIORITY_NAMES)
-                    local isHostile  = isPriority or matchesAny(obj.Name, HOSTILE_NAMES)
-                        or (obj.Parent and (
-                            matchesAny(obj.Parent.Name, PRIORITY_NAMES) or
-                            matchesAny(obj.Parent.Name, HOSTILE_NAMES)
-                        ))
-                    if isHostile then
-                        table.insert(newCache, {
-                            model      = obj,
-                            humanoid   = humanoid,
-                            root       = root,
-                            isPriority = isPriority,
-                        })
+local PLAYER_COLOR = Color3.fromRGB(170, 80, 255)
+local NPC_COLOR    = Color3.fromRGB(255, 50, 50)
+local espObjects   = {}   -- [character] = { lines={}, label }
+
+local hasDrawing = (typeof(Drawing) == "table") or (Drawing ~= nil)
+
+local function newLine(color)
+    if not hasDrawing then return nil end
+    local l = Drawing.new("Line")
+    l.Thickness  = 1.5
+    l.Color      = color
+    l.Visible    = false
+    l.Transparency = 1
+    return l
+end
+
+local function newLabel(color)
+    if not hasDrawing then return nil end
+    local t = Drawing.new("Text")
+    t.Size    = 13
+    t.Center  = true
+    t.Outline = true
+    t.Font    = 2
+    t.Color   = color
+    t.OutlineColor = Color3.fromRGB(0, 0, 0)
+    t.Visible = false
+    return t
+end
+
+local function createESP(character, color)
+    if espObjects[character] then return end
+    local lines = {}
+    for i = 1, 4 do lines[i] = newLine(color) end
+    local label = newLabel(color)
+    espObjects[character] = { lines = lines, label = label, color = color }
+end
+
+local function removeESP(character)
+    local obj = espObjects[character]
+    if not obj then return end
+    for _, l in ipairs(obj.lines) do if l then l:Remove() end end
+    if obj.label then obj.label:Remove() end
+    espObjects[character] = nil
+end
+
+-- Desenha caixa 2D a partir de corners na tela
+local function drawBox(lines, x, y, w, h)
+    -- top, bottom, left, right
+    local corners = {
+        { Vector2.new(x,     y),     Vector2.new(x + w, y)     },
+        { Vector2.new(x,     y + h), Vector2.new(x + w, y + h) },
+        { Vector2.new(x,     y),     Vector2.new(x,     y + h) },
+        { Vector2.new(x + w, y),     Vector2.new(x + w, y + h) },
+    }
+    for i, pts in ipairs(corners) do
+        if lines[i] then
+            lines[i].From    = pts[1]
+            lines[i].To      = pts[2]
+            lines[i].Visible = true
+        end
+    end
+end
+
+local function hideBox(lines, label)
+    for _, l in ipairs(lines) do if l then l.Visible = false end end
+    if label then label.Visible = false end
+end
+
+-- Atualiza ESP todo frame
+RunService.RenderStepped:Connect(function()
+    for character, obj in pairs(espObjects) do
+        if not ESPEnabled then
+            hideBox(obj.lines, obj.label)
+        else
+            local hum  = character:FindFirstChildOfClass("Humanoid")
+            local root = character:FindFirstChild("HumanoidRootPart")
+            local head = character:FindFirstChild("Head")
+
+            if hum and root and head and hum.Health > 0 then
+                -- Projeta topo (acima da cabeça) e base (root) na tela
+                local topPos,    topVis  = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.7, 0))
+                local bottomPos, botVis  = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 2.8, 0))
+
+                if topVis and botVis and topPos.Z > 0 then
+                    local h = math.abs(bottomPos.Y - topPos.Y)
+                    local w = h * 0.55
+                    local x = topPos.X - w / 2
+                    local y = topPos.Y
+
+                    drawBox(obj.lines, x, y, w, h)
+
+                    if obj.label then
+                        local dist = (Camera.CFrame.Position - root.Position).Magnitude
+                        local player = playerChars[character]
+                        local name   = player and player.Name or character.Name
+                        obj.label.Position = Vector2.new(topPos.X, y - 16)
+                        obj.label.Text     = name .. "  [" .. math.floor(dist) .. "m]"
+                        obj.label.Visible  = true
                     end
+                else
+                    hideBox(obj.lines, obj.label)
                 end
-            end
-            -- Yield a cada 200 objetos para não travar o jogo
-            count = count + 1
-            if count % 200 == 0 then
-                task.wait()
+            else
+                hideBox(obj.lines, obj.label)
             end
         end
-        hostileCache    = newCache
-        cacheRebuilding = false
-    end)
+    end
+end)
+
+-- ==================== Hook players ====================
+local function hookPlayer(player)
+    if player == LocalPlayer then return end
+    local function onChar(char)
+        playerChars[char] = player
+        createESP(char, PLAYER_COLOR)
+    end
+    local function onCharRemove(char)
+        playerChars[char] = nil
+        removeESP(char)
+    end
+    player.CharacterAdded:Connect(onChar)
+    player.CharacterRemoving:Connect(onCharRemove)
+    if player.Character then onChar(player.Character) end
 end
 
--- Atualiza cache quando entidades aparecem/somem
+for _, p in ipairs(Players:GetPlayers()) do hookPlayer(p) end
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(function(p)
+    if p.Character then
+        playerChars[p.Character] = nil
+        removeESP(p.Character)
+    end
+end)
+
+-- ==================== Track NPCs ====================
+local trackedNPCs = {}
+
+local function tryAddNPC(model)
+    if trackedNPCs[model] then return end
+    if not isNPCModel(model) then return end
+    trackedNPCs[model] = true
+    createESP(model, NPC_COLOR)
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.Died:Connect(function()
+            task.delay(2, function()
+                trackedNPCs[model] = nil
+                removeESP(model)
+            end)
+        end)
+    end
+end
+
 workspace.DescendantAdded:Connect(function(obj)
-    if obj:IsA("Model") then
-        task.delay(0.5, rebuildHostileCache) -- delay maior: evita spam de rebuilds
+    if obj:IsA("Humanoid") and obj.Parent and obj.Parent:IsA("Model") then
+        task.defer(function() tryAddNPC(obj.Parent) end)
     end
 end)
 workspace.DescendantRemoving:Connect(function(obj)
-    if obj:IsA("Model") then
-        -- Remoção é barata: só tira do cache sem rebuild completo
-        for i, entry in ipairs(hostileCache) do
-            if entry.model == obj then
-                table.remove(hostileCache, i)
-                break
-            end
-        end
+    if obj:IsA("Model") and trackedNPCs[obj] then
+        trackedNPCs[obj] = nil
+        removeESP(obj)
     end
 end)
 
--- Scan inicial assíncrono: não trava o jogo ao executar
-task.spawn(rebuildHostileCache)
+-- Scan inicial assíncrono sem travar
+task.spawn(function()
+    local count = 0
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Humanoid") and obj.Parent and obj.Parent:IsA("Model") then
+            tryAddNPC(obj.Parent)
+        end
+        count = count + 1
+        if count % 300 == 0 then task.wait() end
+    end
+end)
 
 -- ==================== ScreenGui ====================
 local screenGui = Instance.new("ScreenGui")
@@ -105,54 +244,48 @@ screenGui.Parent         = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ==================== Main Frame ====================
 local mainFrame = Instance.new("Frame")
-mainFrame.Size                = UDim2.new(0, 275, 0, 310)
-mainFrame.Position            = UDim2.new(1, -310, 0.5, -155)
-mainFrame.BackgroundColor3    = Color3.fromRGB(10, 10, 14)
-mainFrame.BackgroundTransparency = 0.18
-mainFrame.BorderSizePixel     = 0
-mainFrame.Visible             = false
-mainFrame.Active              = true
-mainFrame.Parent              = screenGui
-mainFrame.ZIndex              = 5
+mainFrame.Size                   = UDim2.new(0, 278, 0, 320)
+mainFrame.Position               = UDim2.new(1, -314, 0.5, -160)
+mainFrame.BackgroundColor3       = Color3.fromRGB(9, 9, 13)
+mainFrame.BackgroundTransparency = 0.10
+mainFrame.BorderSizePixel        = 0
+mainFrame.Visible                = false
+mainFrame.Active                 = true
+mainFrame.Parent                 = screenGui
+mainFrame.ZIndex                 = 5
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 16)
 
--- ==================== Stroke ====================
-local stroke = Instance.new("UIStroke")
-stroke.Color       = Color3.fromRGB(120, 60, 200)
-stroke.Thickness   = 1.2
-stroke.Transparency = 0.5
-stroke.Parent      = mainFrame
+local frameStroke = Instance.new("UIStroke")
+frameStroke.Color        = Color3.fromRGB(130, 55, 220)
+frameStroke.Thickness    = 1.4
+frameStroke.Transparency = 0.3
+frameStroke.Parent       = mainFrame
 
--- ==================== Drag (apenas barra de título) ====================
+-- ==================== Drag (só barra do título) ====================
 local titleBar = Instance.new("Frame")
-titleBar.Size               = UDim2.new(1, 0, 0, 52)
+titleBar.Size               = UDim2.new(1, 0, 0, 54)
 titleBar.BackgroundTransparency = 1
 titleBar.ZIndex             = 9
 titleBar.Parent             = mainFrame
 
 do
-    local dragging      = false
-    local dragMouse     = nil
-    local dragFramePos  = nil
-
+    local dragging, dragMouse, dragOrigin = false, nil, nil
     titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging     = true
-            dragMouse    = input.Position
-            dragFramePos = mainFrame.Position
+            dragging   = true
+            dragMouse  = input.Position
+            dragOrigin = mainFrame.Position
         end
     end)
-
     UserInputService.InputChanged:Connect(function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
             local d = input.Position - dragMouse
             mainFrame.Position = UDim2.new(
-                dragFramePos.X.Scale, dragFramePos.X.Offset + d.X,
-                dragFramePos.Y.Scale, dragFramePos.Y.Offset + d.Y
+                dragOrigin.X.Scale, dragOrigin.X.Offset + d.X,
+                dragOrigin.Y.Scale, dragOrigin.Y.Offset + d.Y
             )
         end
     end)
-
     UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
@@ -161,82 +294,78 @@ do
 end
 
 -- ==================== Título ====================
-local title = Instance.new("TextLabel")
-title.Size                  = UDim2.new(1, 0, 0, 50)
-title.BackgroundTransparency = 1
-title.Text                  = "☠️  Morte Branca"
-title.TextColor3            = Color3.fromRGB(255, 255, 255)
-title.Font                  = Enum.Font.GothamBlack
-title.TextSize              = 22
-title.TextStrokeTransparency = 0.6
-title.TextStrokeColor3      = Color3.fromRGB(100, 50, 180)
-title.ZIndex                = 7
-title.Parent                = mainFrame
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size                  = UDim2.new(1, 0, 0, 52)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text                  = "☠  Morte Branca"
+titleLabel.TextColor3            = Color3.fromRGB(255, 255, 255)
+titleLabel.Font                  = Enum.Font.GothamBlack
+titleLabel.TextSize              = 21
+titleLabel.TextStrokeTransparency = 0.5
+titleLabel.TextStrokeColor3      = Color3.fromRGB(110, 40, 190)
+titleLabel.ZIndex                = 7
+titleLabel.Parent                = mainFrame
 
--- ==================== Linha ====================
-local line = Instance.new("Frame")
-line.Size             = UDim2.new(1, -28, 0, 1)
-line.Position         = UDim2.new(0, 14, 0, 51)
-line.BackgroundColor3 = Color3.fromRGB(150, 80, 255)
-line.BorderSizePixel  = 0
-line.ZIndex           = 7
-line.Parent           = mainFrame
+local sep = Instance.new("Frame")
+sep.Size             = UDim2.new(1, -28, 0, 1)
+sep.Position         = UDim2.new(0, 14, 0, 53)
+sep.BackgroundColor3 = Color3.fromRGB(130, 55, 230)
+sep.BorderSizePixel  = 0
+sep.ZIndex           = 7
+sep.Parent           = mainFrame
 
--- ==================== UI: Toggle ====================
-local npcStrongButton -- referência global para dim/undim
+-- ==================== UI Helpers ====================
+local npcStrongBtn = nil
 
-local function createToggle(yPos, text, defaultValue, callback, getRef)
-    local frame = Instance.new("Frame")
-    frame.Size               = UDim2.new(1, -28, 0, 32)
-    frame.Position           = UDim2.new(0, 14, 0, yPos)
-    frame.BackgroundTransparency = 1
-    frame.ZIndex             = 6
-    frame.Parent             = mainFrame
+local function makeToggle(yPos, label, value, onChange, captureRef)
+    local row = Instance.new("Frame")
+    row.Size               = UDim2.new(1, -28, 0, 32)
+    row.Position           = UDim2.new(0, 14, 0, yPos)
+    row.BackgroundTransparency = 1
+    row.ZIndex             = 6
+    row.Parent             = mainFrame
 
-    local label = Instance.new("TextLabel")
-    label.Size               = UDim2.new(0.65, 0, 1, 0)
-    label.BackgroundTransparency = 1
-    label.Text               = text
-    label.TextColor3         = Color3.fromRGB(230, 230, 238)
-    label.Font               = Enum.Font.GothamSemibold
-    label.TextSize           = 14
-    label.TextXAlignment     = Enum.TextXAlignment.Left
-    label.ZIndex             = 6
-    label.Parent             = frame
+    local lbl = Instance.new("TextLabel")
+    lbl.Size               = UDim2.new(0.7, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text               = label
+    lbl.TextColor3         = Color3.fromRGB(225, 225, 235)
+    lbl.Font               = Enum.Font.GothamSemibold
+    lbl.TextSize           = 14
+    lbl.TextXAlignment     = Enum.TextXAlignment.Left
+    lbl.ZIndex             = 7
+    lbl.Parent             = row
 
     local btn = Instance.new("TextButton")
-    btn.Size             = UDim2.new(0, 62, 0, 26)
-    btn.Position         = UDim2.new(1, -66, 0.5, -13)
-    btn.BackgroundColor3 = defaultValue and Color3.fromRGB(160, 100, 255) or Color3.fromRGB(38, 38, 48)
-    btn.Text             = defaultValue and "ON" or "OFF"
+    btn.Size             = UDim2.new(0, 60, 0, 26)
+    btn.Position         = UDim2.new(1, -62, 0.5, -13)
+    btn.BackgroundColor3 = value and Color3.fromRGB(148, 68, 255) or Color3.fromRGB(36, 36, 46)
+    btn.Text             = value and "ON" or "OFF"
     btn.TextColor3       = Color3.fromRGB(255, 255, 255)
     btn.Font             = Enum.Font.GothamBold
     btn.TextSize         = 13
     btn.BorderSizePixel  = 0
-    btn.ZIndex           = 7
-    btn.Parent           = frame
+    btn.ZIndex           = 8
+    btn.Parent           = row
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 
-    if getRef then getRef(btn) end
+    if captureRef then captureRef(btn) end
 
     btn.MouseButton1Click:Connect(function()
-        defaultValue         = not defaultValue
-        btn.BackgroundColor3 = defaultValue and Color3.fromRGB(160, 100, 255) or Color3.fromRGB(38, 38, 48)
-        btn.Text             = defaultValue and "ON" or "OFF"
-        callback(defaultValue)
+        value            = not value
+        btn.BackgroundColor3 = value and Color3.fromRGB(148, 68, 255) or Color3.fromRGB(36, 36, 46)
+        btn.Text         = value and "ON" or "OFF"
+        onChange(value)
     end)
-
-    return btn
 end
 
--- ==================== UI: Input ====================
-local function createInput(yPos, labelText, defaultValue, isFOV)
+local function makeInput(yPos, label, default, isFOV)
     local lbl = Instance.new("TextLabel")
-    lbl.Size               = UDim2.new(0.6, 0, 0, 26)
+    lbl.Size               = UDim2.new(0.58, 0, 0, 26)
     lbl.Position           = UDim2.new(0, 14, 0, yPos)
     lbl.BackgroundTransparency = 1
-    lbl.Text               = labelText .. tostring(defaultValue)
-    lbl.TextColor3         = Color3.fromRGB(195, 195, 210)
+    lbl.Text               = label .. tostring(default)
+    lbl.TextColor3         = Color3.fromRGB(190, 190, 205)
     lbl.Font               = Enum.Font.Gotham
     lbl.TextSize           = 13.5
     lbl.TextXAlignment     = Enum.TextXAlignment.Left
@@ -244,36 +373,36 @@ local function createInput(yPos, labelText, defaultValue, isFOV)
     lbl.Parent             = mainFrame
 
     local box = Instance.new("TextBox")
-    box.Size               = UDim2.new(0, 72, 0, 26)
-    box.Position           = UDim2.new(1, -86, 0, yPos)
-    box.BackgroundColor3   = Color3.fromRGB(20, 20, 28)
-    box.TextColor3         = Color3.fromRGB(255, 255, 255)
-    box.Text               = tostring(defaultValue)
-    box.Font               = Enum.Font.Gotham
-    box.TextSize           = 13
-    box.BorderSizePixel    = 0
-    box.ClearTextOnFocus   = false
-    box.ZIndex             = 7
-    box.Parent             = mainFrame
+    box.Size             = UDim2.new(0, 72, 0, 26)
+    box.Position         = UDim2.new(1, -86, 0, yPos)
+    box.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+    box.TextColor3       = Color3.fromRGB(255, 255, 255)
+    box.Text             = tostring(default)
+    box.Font             = Enum.Font.Gotham
+    box.TextSize         = 13
+    box.BorderSizePixel  = 0
+    box.ClearTextOnFocus = false
+    box.ZIndex           = 8
+    box.Parent           = mainFrame
     Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
 
-    local stroke2 = Instance.new("UIStroke")
-    stroke2.Color       = Color3.fromRGB(90, 50, 140)
-    stroke2.Thickness   = 1
-    stroke2.Transparency = 0.4
-    stroke2.Parent      = box
+    local bStroke = Instance.new("UIStroke")
+    bStroke.Color       = Color3.fromRGB(100, 40, 180)
+    bStroke.Thickness   = 1
+    bStroke.Transparency = 0.45
+    bStroke.Parent      = box
 
     box.FocusLost:Connect(function()
-        local num = tonumber(box.Text)
-        if num then
+        local n = tonumber(box.Text)
+        if n then
             if isFOV then
-                AimbotFOV = math.clamp(num, 20, 900)
+                AimbotFOV = math.clamp(n, 20, 900)
                 box.Text  = tostring(AimbotFOV)
-                lbl.Text  = labelText .. AimbotFOV
+                lbl.Text  = label .. AimbotFOV
             else
-                MaxAimbotDistance = math.clamp(num, 50, 2500)
+                MaxAimbotDistance = math.clamp(n, 50, 2500)
                 box.Text  = tostring(MaxAimbotDistance)
-                lbl.Text  = labelText .. MaxAimbotDistance
+                lbl.Text  = label .. MaxAimbotDistance
             end
         else
             box.Text = isFOV and tostring(AimbotFOV) or tostring(MaxAimbotDistance)
@@ -281,142 +410,78 @@ local function createInput(yPos, labelText, defaultValue, isFOV)
     end)
 end
 
--- ==================== Monta Interface ====================
-createToggle(62,  "Aimbot Players",         AimbotEnabled, function(v) AimbotEnabled = v end)
-
-createToggle(96,  "Aim NPC Hostil",         AimNPCEnabled, function(v)
+-- ==================== Build UI ====================
+makeToggle(62,  "Aimbot  ·  Players",  AimbotEnabled, function(v) AimbotEnabled = v end)
+makeToggle(97,  "Aimbot  ·  NPC",      AimNPCEnabled, function(v)
     AimNPCEnabled = v
-    -- Escurece/ilumina o botão de Mira Forte visualmente
-    if npcStrongButton then
-        npcStrongButton.TextTransparency = v and 0 or 0.5
-        npcStrongButton.BackgroundTransparency = v and 0 or 0.4
+    if npcStrongBtn then
+        npcStrongBtn.TextTransparency       = v and 0 or 0.5
+        npcStrongBtn.BackgroundTransparency = v and 0 or 0.5
+    end
+end)
+makeToggle(132, "NPC  ·  Lock On",     AimNPCStrong,  function(v) AimNPCStrong = v end,
+    function(r) npcStrongBtn = r end)
+makeToggle(167, "ESP  ·  Outlines",    ESPEnabled,    function(v)
+    ESPEnabled = v
+    if not v then
+        for _, obj in pairs(espObjects) do
+            hideBox(obj.lines, obj.label)
+        end
     end
 end)
 
-createToggle(130, "NPC Mira Forte (Gruda)", AimNPCStrong,  function(v) AimNPCStrong = v end,
-    function(ref) npcStrongButton = ref end)
+makeInput(208, "FOV  ·  ",       AimbotFOV,         true)
+makeInput(240, "Max Range  ·  ", MaxAimbotDistance,  false)
 
-createToggle(164, "ESP Players",            ESPEnabled,    function(v) ESPEnabled = v end)
-
-createInput(202, "FOV: ",           AimbotFOV,          true)
-createInput(234, "Distância Máx: ", MaxAimbotDistance,  false)
-
--- ==================== Indicador de Mira ====================
-local aimPartLabel = Instance.new("TextLabel")
-aimPartLabel.Size               = UDim2.new(1, -28, 0, 26)
-aimPartLabel.Position           = UDim2.new(0, 14, 0, 276)
-aimPartLabel.BackgroundTransparency = 1
-aimPartLabel.Text               = "Mira: Cabeça  [B] trocar  |  [Shift Dir] menu"
-aimPartLabel.TextColor3         = Color3.fromRGB(140, 80, 220)
-aimPartLabel.Font               = Enum.Font.GothamBold
-aimPartLabel.TextSize           = 12
-aimPartLabel.TextXAlignment     = Enum.TextXAlignment.Left
-aimPartLabel.ZIndex             = 6
-aimPartLabel.Parent             = mainFrame
+local aimHint = Instance.new("TextLabel")
+aimHint.Size               = UDim2.new(1, -28, 0, 24)
+aimHint.Position           = UDim2.new(0, 14, 0, 285)
+aimHint.BackgroundTransparency = 1
+aimHint.Text               = "Aim Part: Head   ·   [B] swap   ·   [RShift] menu"
+aimHint.TextColor3         = Color3.fromRGB(110, 55, 190)
+aimHint.Font               = Enum.Font.Gotham
+aimHint.TextSize           = 11.5
+aimHint.TextXAlignment     = Enum.TextXAlignment.Left
+aimHint.ZIndex             = 6
+aimHint.Parent             = mainFrame
 
 -- ==================== Hotkeys ====================
-UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
     if input.KeyCode == Enum.KeyCode.RightShift then
         mainFrame.Visible = not mainFrame.Visible
     end
-
     if input.KeyCode == Enum.KeyCode.B then
         if AimPart == "Head" then
-            AimPart = "HumanoidRootPart"
-            aimPartLabel.Text = "Mira: Corpo  [B] trocar  |  [Shift Dir] menu"
+            AimPart      = "HumanoidRootPart"
+            aimHint.Text = "Aim Part: Body   ·   [B] swap   ·   [RShift] menu"
         else
-            AimPart = "Head"
-            aimPartLabel.Text = "Mira: Cabeça  [B] trocar  |  [Shift Dir] menu"
+            AimPart      = "Head"
+            aimHint.Text = "Aim Part: Head   ·   [B] swap   ·   [RShift] menu"
         end
     end
 end)
 
--- ==================== ESP ====================
-local ESPObjects = {}
-
-local function createESP(player)
-    if player == LocalPlayer or ESPObjects[player] then return end
-    -- Verifica se Drawing API existe no executor
-    if not Drawing then return end
-    local text          = Drawing.new("Text")
-    text.Size           = 15
-    text.Center         = true
-    text.Outline        = true
-    text.Font           = 2
-    text.Color          = Color3.fromRGB(185, 130, 255)
-    text.OutlineColor   = Color3.fromRGB(0, 0, 0)
-    text.Visible        = false
-    ESPObjects[player]  = text
-end
-
-for _, plr in ipairs(Players:GetPlayers()) do createESP(plr) end
-Players.PlayerAdded:Connect(createESP)
-Players.PlayerRemoving:Connect(function(player)
-    if ESPObjects[player] then
-        ESPObjects[player]:Remove()
-        ESPObjects[player] = nil
-    end
-end)
-
-RunService.RenderStepped:Connect(function()
-    for player, esp in pairs(ESPObjects) do
-        local char = player.Character
-        if ESPEnabled and char then
-            local head     = char:FindFirstChild("Head")
-            local humanoid = char:FindFirstChildOfClass("Humanoid")
-            if head and humanoid and humanoid.Health > 0 then
-                local pos, visible = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.6, 0))
-                if visible and pos.Z > 0 then
-                    local dist = (Camera.CFrame.Position - head.Position).Magnitude
-                    if dist <= MaxAimbotDistance then
-                        esp.Position = Vector2.new(pos.X, pos.Y - 30)
-                        esp.Text     = player.Name .. "  [" .. math.floor(dist) .. "m]"
-                        esp.Visible  = true
-                    else
-                        esp.Visible = false
-                    end
-                else
-                    esp.Visible = false
-                end
-            else
-                esp.Visible = false
-            end
-        else
-            esp.Visible = false
-        end
-    end
-end)
-
--- ==================== Utilitários ====================
-local function hasItemInHand()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChildOfClass("Tool") ~= nil
-end
-
--- ==================== Target: Player ====================
+-- ==================== Aimbot: Player ====================
 local function getClosestPlayer()
     local bestDist = math.huge
     local bestPart = nil
     local center   = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local char = player.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 then
-                    local part = char:FindFirstChild(AimPart) or char:FindFirstChild("HumanoidRootPart")
-                    if part then
-                        local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
-                        if onScreen and sp.Z > 0 then
-                            local sDist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-                            local rDist = (Camera.CFrame.Position - part.Position).Magnitude
-                            if sDist < AimbotFOV and sDist < bestDist and rDist <= MaxAimbotDistance then
-                                bestDist = sDist
-                                bestPart = part
-                            end
+        if player ~= LocalPlayer and player.Character then
+            local hum = player.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local part = player.Character:FindFirstChild(AimPart)
+                          or player.Character:FindFirstChild("HumanoidRootPart")
+                if part then
+                    local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen and sp.Z > 0 then
+                        local sDist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                        local rDist = (Camera.CFrame.Position - part.Position).Magnitude
+                        if sDist < AimbotFOV and sDist < bestDist and rDist <= MaxAimbotDistance then
+                            bestDist = sDist
+                            bestPart = part
                         end
                     end
                 end
@@ -426,39 +491,25 @@ local function getClosestPlayer()
     return bestPart
 end
 
--- ==================== Target: NPC Hostil (via cache) ====================
-local function getClosestHostileNPC()
-    local bestDist     = math.huge
-    local bestPart     = nil
-    local priorityPart = nil
-    local center       = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-    local myRoot       = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+-- ==================== Aimbot: NPC ====================
+local function getClosestNPC()
+    local bestDist = math.huge
+    local bestPart = nil
+    local center   = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local myRoot   = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not myRoot then return nil end
 
-    -- Rescan periódico leve (fallback de segurança)
-    local now = tick()
-    if now - lastCacheScan >= CACHE_INTERVAL then
-        lastCacheScan = now
-        task.spawn(rebuildHostileCache)
-    end
-
-    for _, entry in ipairs(hostileCache) do
-        local hum  = entry.humanoid
-        local root = entry.root
+    for model in pairs(trackedNPCs) do
+        local hum  = model:FindFirstChildOfClass("Humanoid")
+        local root = model:FindFirstChild("HumanoidRootPart")
         if hum and root and hum.Health > 0 then
-            local part = entry.model:FindFirstChild(AimPart) or root
-            local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
-            if onScreen and sp.Z > 0 then
-                local sDist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-                local rDist = (myRoot.Position - part.Position).Magnitude
-                if sDist < AimbotFOV and rDist <= MaxAimbotDistance then
-                    if entry.isPriority then
-                        -- Boss: vence sempre (pega o mais perto de center entre os bosses)
-                        if not priorityPart or sDist < bestDist then
-                            bestDist     = sDist
-                            priorityPart = part
-                        end
-                    elseif not priorityPart and sDist < bestDist then
+            local rDist = (myRoot.Position - root.Position).Magnitude
+            if rDist <= NpcScanRadius and rDist <= MaxAimbotDistance then
+                local part = model:FindFirstChild(AimPart) or root
+                local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+                if onScreen and sp.Z > 0 then
+                    local sDist = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                    if sDist < AimbotFOV and sDist < bestDist then
                         bestDist = sDist
                         bestPart = part
                     end
@@ -466,11 +517,16 @@ local function getClosestHostileNPC()
             end
         end
     end
-
-    return priorityPart or bestPart
+    return bestPart
 end
 
--- ==================== Aimbot Principal ====================
+-- ==================== Tool Check ====================
+local function hasItemInHand()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Tool") ~= nil
+end
+
+-- ==================== Aimbot Loop ====================
 RunService.RenderStepped:Connect(function()
     if not UserInputService:IsMouseButtonPressed(AimbotKey) then return end
     if not hasItemInHand() then return end
@@ -479,7 +535,7 @@ RunService.RenderStepped:Connect(function()
     local isNPC      = false
 
     if AimNPCEnabled then
-        targetPart = getClosestHostileNPC()
+        targetPart = getClosestNPC()
         if targetPart then isNPC = true end
     end
 
@@ -490,13 +546,10 @@ RunService.RenderStepped:Connect(function()
     if not targetPart then return end
 
     if isNPC and AimNPCStrong then
-        -- Mira rígida: câmera gruda instantaneamente
         Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPart.Position)
     else
-        -- Mira suave com predição de movimento
-        -- AssemblyLinearVelocity é o correto no Roblox atual (Velocity foi depreciado)
-        local root = targetPart.Parent and targetPart.Parent:FindFirstChild("HumanoidRootPart")
-        local vel  = (root and root.AssemblyLinearVelocity) or Vector3.zero
+        local root      = targetPart.Parent and targetPart.Parent:FindFirstChild("HumanoidRootPart")
+        local vel       = (root and root.AssemblyLinearVelocity) or Vector3.zero
         local predicted = targetPart.Position + (vel * 0.035)
         local targetCF  = CFrame.new(Camera.CFrame.Position, predicted)
         local smooth    = math.clamp(AimSpeed * 0.016 * 1.8, 0.08, 0.92)
@@ -504,4 +557,4 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
-print("✅ Morte Branca | Shift Direito = Menu | B = Trocar Mira")
+print("✅ Morte Branca | [RShift] Menu  [B] Swap Aim Part")
